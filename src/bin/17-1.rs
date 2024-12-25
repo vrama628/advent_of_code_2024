@@ -1,6 +1,7 @@
 use std::io::stdin;
 
 use itertools::Itertools;
+use regex::Regex;
 
 struct Program {
     a: usize,
@@ -12,43 +13,23 @@ struct Program {
 impl Program {
     fn parse() -> Self {
         let mut lines = stdin().lines();
-        let a = lines
-            .next()
-            .unwrap()
-            .unwrap()
-            .split_ascii_whitespace()
-            .last()
-            .unwrap()
-            .parse()
-            .unwrap();
-        let b = lines
-            .next()
-            .unwrap()
-            .unwrap()
-            .split_ascii_whitespace()
-            .last()
-            .unwrap()
-            .parse()
-            .unwrap();
-        let c = lines
-            .next()
-            .unwrap()
-            .unwrap()
-            .split_ascii_whitespace()
-            .last()
-            .unwrap()
-            .parse()
+        let register_regex = Regex::new(r"Register [ABC]: (\d+)").unwrap();
+        let (a, b, c) = lines
+            .by_ref()
+            .map(|line| {
+                register_regex.captures(&line.unwrap()).unwrap()[1]
+                    .parse()
+                    .unwrap()
+            })
+            .next_tuple()
             .unwrap();
         lines.next().unwrap().unwrap();
-        let program = lines
-            .next()
-            .unwrap()
-            .unwrap()
-            .split_ascii_whitespace()
-            .last()
-            .unwrap()
-            .split(",")
-            .map(|s| s.parse().unwrap())
+        let program_regex = regex::Regex::new(r"Program: ((?:\d,)*\d)").unwrap();
+        let program = program_regex
+            .captures(&lines.next().unwrap().unwrap())
+            .unwrap()[1]
+            .split(',')
+            .map(|n| n.parse().unwrap())
             .collect();
         Self { a, b, c, program }
     }
