@@ -1,4 +1,7 @@
-use std::{io::stdin, iter::empty};
+use std::{
+    io::stdin,
+    iter::{empty, once},
+};
 
 use itertools::Itertools;
 use regex::Regex;
@@ -84,7 +87,7 @@ impl<'ctx> Program<BV<'ctx>, Bool<'ctx>> {
         }
         if i >= self.program.len() {
             return if output == self.program.len() {
-                Box::new(std::iter::once(self.constraints))
+                Box::new(once(self.constraints))
             } else {
                 Box::new(empty())
             };
