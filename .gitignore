@@ -2,3 +2,4 @@
 /inputs
 .DS_Store
 *.txt
+.z3-trace
