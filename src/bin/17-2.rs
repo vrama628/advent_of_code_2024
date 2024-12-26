@@ -1,81 +1,24 @@
-use std::{fmt::Display, io::stdin, iter::empty, rc::Rc};
+use std::{io::stdin, iter::empty};
 
 use itertools::Itertools;
 use regex::Regex;
+use z3::{
+    ast::{Ast, Bool, BV},
+    Config, Context, Optimize, SatResult,
+};
 
 #[derive(Clone)]
-struct Program<O> {
+struct Program<O, C> {
     a: O,
     b: O,
     c: O,
     program: Vec<u8>,
+    constraints: C,
 }
 
-enum Operand {
-    A,
-    Const(usize),
-    ShiftRight(Op, Op),
-    XOr(Op, Op),
-    Mod8(Op),
-}
+const SIZE: u32 = 64;
 
-impl Display for Operand {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Operand::A => write!(f, "A"),
-            Operand::Const(c) => write!(f, "{c}"),
-            Operand::ShiftRight(a, b) => write!(f, "({a} >> {b})"),
-            Operand::XOr(a, b) => write!(f, "({a} ^ {b})"),
-            Operand::Mod8(x) => write!(f, "({x} % 8)"),
-        }
-    }
-}
-
-type Op = Rc<Operand>;
-
-enum Constraint {
-    Eq(Op, u8),
-    NotZero(Op),
-}
-
-impl Constraint {
-    fn and(self, cs: Cs) -> Cs {
-        Rc::new(Constraints::And(self, cs))
-    }
-}
-
-impl Display for Constraint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Constraint::Eq(operand, c) => write!(f, "{operand} == {c}"),
-            Constraint::NotZero(operand) => write!(f, "{operand} != 0"),
-        }
-    }
-}
-
-enum Constraints {
-    T,
-    And(Constraint, Cs),
-}
-
-impl Constraints {
-    fn t() -> Cs {
-        Rc::new(Self::T)
-    }
-}
-
-impl Display for Constraints {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Constraints::T => Ok(()),
-            Constraints::And(constraint, constraints) => write!(f, "{constraints}{constraint}\n"),
-        }
-    }
-}
-
-type Cs = Rc<Constraints>;
-
-impl Program<usize> {
+impl Program<u64, ()> {
     fn parse() -> Self {
         let mut lines = stdin().lines();
         let register_regex = Regex::new(r"Register [ABC]: (\d+)").unwrap();
@@ -96,23 +39,34 @@ impl Program<usize> {
             .split(',')
             .map(|n| n.parse().unwrap())
             .collect();
-        Self { a, b, c, program }
+        Self {
+            a,
+            b,
+            c,
+            program,
+            constraints: (),
+        }
     }
 
-    fn corrupt(self) -> Program<Op> {
+    fn corrupt(self, ctx: &Context) -> Program<BV<'_>, Bool<'_>> {
         Program {
-            a: Rc::new(Operand::A),
-            b: Rc::new(Operand::Const(self.b)),
-            c: Rc::new(Operand::Const(self.c)),
+            a: BV::new_const(ctx, "A", SIZE),
+            b: BV::from_u64(ctx, self.b, SIZE),
+            c: BV::from_u64(ctx, self.c, SIZE),
             program: self.program,
+            constraints: Bool::from_bool(ctx, true),
         }
     }
 }
 
-impl Program<Op> {
-    fn combo(&self, operand: u8) -> Op {
+impl<'ctx> Program<BV<'ctx>, Bool<'ctx>> {
+    fn ctx(&self) -> &'ctx Context {
+        self.constraints.get_ctx()
+    }
+
+    fn combo(&self, operand: u8) -> BV<'ctx> {
         match operand {
-            0 | 1 | 2 | 3 => Rc::new(Operand::Const(operand as usize)),
+            0 | 1 | 2 | 3 => BV::from_u64(self.ctx(), operand as u64, SIZE),
             4 => self.a.clone(),
             5 => self.b.clone(),
             6 => self.c.clone(),
@@ -120,79 +74,77 @@ impl Program<Op> {
         }
     }
 
-    fn run(mut self, i: usize, constraints: Cs, output: usize) -> Box<dyn Iterator<Item = Cs>> {
+    fn and(&mut self, constraint: Bool<'ctx>) {
+        self.constraints = Bool::and(self.ctx(), &[&self.constraints, &constraint])
+    }
+
+    fn run(mut self, i: usize, output: usize) -> Box<dyn Iterator<Item = Bool<'ctx>> + 'ctx> {
         if output > self.program.len() {
             return Box::new(empty());
         }
         if i >= self.program.len() {
             return if output == self.program.len() {
-                Box::new(std::iter::once(constraints))
+                Box::new(std::iter::once(self.constraints))
             } else {
                 Box::new(empty())
             };
         }
         match self.program[i] {
-            0 => {
-                self.a = Rc::new(Operand::ShiftRight(
-                    self.a.clone(),
-                    self.combo(self.program[i + 1]),
-                ))
+            0 => self.a = self.a.bvashr(&self.combo(self.program[i + 1])),
+            1 => self.b ^= &BV::from_u64(self.ctx(), self.program[i + 1] as u64, SIZE),
+            2 => {
+                self.b = self
+                    .combo(self.program[i + 1])
+                    .bvurem(&BV::from_u64(self.ctx(), 8, SIZE))
             }
-            1 => {
-                self.b = Rc::new(Operand::XOr(
-                    self.b.clone(),
-                    Rc::new(Operand::Const(self.program[i + 1] as usize)),
-                ))
-            }
-            2 => self.b = Rc::new(Operand::Mod8(self.combo(self.program[i + 1]))),
             3 => {
-                let a = self.a.clone();
+                let mut no_jump = self.clone();
+                no_jump.and(self.a._eq(&BV::from_u64(self.ctx(), 0, SIZE)));
+                self.and(BV::distinct(
+                    self.ctx(),
+                    &[&self.a, &BV::from_u64(self.ctx(), 0, SIZE)],
+                ));
                 let jump_to = self.program[i + 1] as usize;
-                return Box::new(
-                    self.clone()
-                        .run(
-                            i + 2,
-                            Constraint::Eq(self.a.clone(), 0).and(constraints.clone()),
-                            output,
-                        )
-                        .chain(self.run(jump_to, Constraint::NotZero(a).and(constraints), output)),
-                );
+                return Box::new(no_jump.run(i + 2, output).chain(self.run(jump_to, output)));
             }
-            4 => self.b = Rc::new(Operand::XOr(self.b.clone(), self.c.clone())),
+            4 => self.b ^= &self.c,
             5 => {
                 return if output >= self.program.len() {
                     Box::new(empty())
                 } else {
-                    let actual = Rc::new(Operand::Mod8(self.combo(self.program[i + 1])));
-                    let expected = self.program[output];
-                    self.run(
-                        i + 2,
-                        Constraint::Eq(actual, expected).and(constraints),
-                        output + 1,
-                    )
+                    self.and(
+                        self.combo(self.program[i + 1])
+                            .bvurem(&BV::from_u64(self.ctx(), 8, SIZE))
+                            ._eq(&BV::from_u64(self.ctx(), self.program[output] as u64, SIZE)),
+                    );
+                    self.run(i + 2, output + 1)
                 };
             }
-            6 => {
-                self.b = Rc::new(Operand::ShiftRight(
-                    self.a.clone(),
-                    self.combo(self.program[i + 1]),
-                ))
-            }
+            6 => self.b = self.a.bvashr(&self.combo(self.program[i + 1])),
             7 => {
-                self.c = Rc::new(Operand::ShiftRight(
-                    self.a.clone(),
-                    self.combo(self.program[i + 1]),
-                ))
+                self.c = self.a.bvashr(&self.combo(self.program[i + 1]));
             }
             _ => panic!(),
         }
-        self.run(i + 2, constraints, output)
+        self.run(i + 2, output)
     }
 }
 
 fn main() {
-    let program = Program::parse().corrupt();
-    for constraints in program.run(0, Constraints::t(), 0) {
-        println!("CONSTRAINTS:\n{constraints}");
+    let mut cfg = Config::new();
+    cfg.set_model_generation(true);
+    let ctx = Context::new(&cfg);
+    let program = Program::parse().corrupt(&ctx);
+    let a = program.a.clone();
+    let optimize = Optimize::new(&ctx);
+    optimize.minimize(&a);
+    for constraints in program.run(0, 0) {
+        optimize.push();
+        optimize.assert(&constraints);
+        if let SatResult::Sat = optimize.check(&[]) {
+            let model = optimize.get_model().unwrap();
+            println!("{}", model.eval(&a, true).unwrap().as_u64().unwrap())
+        }
+        optimize.pop();
     }
 }
