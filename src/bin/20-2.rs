@@ -1,9 +1,12 @@
 use std::{
     cell::OnceCell,
-    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    cmp::Ordering,
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     io::stdin,
     ops::Index,
 };
+
+const CHEAT_LENGTH: usize = 20;
 
 use itertools::Itertools;
 
@@ -73,36 +76,91 @@ impl Racetrack {
         .filter(|&(row, col)| row < self.rows && col < self.cols)
     }
 
-    fn solve(self) -> usize {
-        let mut queue = VecDeque::from([(self.start.clone(), None, 0)]);
-        let mut visited = BTreeMap::from([(self.start.clone(), BTreeMap::from([(None, 0)]))]);
-        while let Some((position, cheat, picoseconds)) = queue.pop_front() {
-            if position == self.end && cheat.is_none() {
-                return visited[&self.end]
-                    .iter()
-                    .filter(|&(_, &p)| p + 100 <= picoseconds)
-                    .count();
+    fn shortest_without_cheat(&self) -> usize {
+        let mut queue = VecDeque::from([(self.start.clone(), 0)]);
+        let mut visited = BTreeSet::from([self.start.clone()]);
+        while let Some((position, picoseconds)) = queue.pop_front() {
+            if position == self.end {
+                return picoseconds;
             }
             for adjacent in self.adjacent(&position) {
-                if let Some(cheat) = if self[&adjacent] {
-                    Some(cheat)
-                } else if cheat.is_none() {
-                    Some(Some(adjacent.clone()))
-                } else {
-                    None
-                } {
-                    if let Entry::Vacant(vacant) = visited
-                        .entry(adjacent.clone())
-                        .or_default()
-                        .entry(cheat.clone())
+                if self[&adjacent] && visited.insert(adjacent.clone()) {
+                    queue.push_back((adjacent, picoseconds + 1));
+                }
+            }
+        }
+        panic!()
+    }
+
+    fn solve(self) -> usize {
+        let shortest_without_cheat = self.shortest_without_cheat();
+        let mut found_cheats = HashMap::new(); //  HashSet::new();
+        loop {
+            if found_cheats.len() % 100 == 0 {
+                println!("{}...", found_cheats.len());
+            }
+            let mut queue = VecDeque::from([(self.start.clone(), vec![], 0)]);
+            let mut visited =
+                BTreeMap::from([((self.start.clone(), 0), (0, BTreeSet::from([vec![]])))]);
+            while let Some((position, cheat, picoseconds)) = queue.pop_front() {
+                if picoseconds + 50 > shortest_without_cheat {
+                    for (p, count) in found_cheats
+                        .iter()
+                        .counts_by(|(_, &p)| p)
+                        .into_iter()
+                        .sorted_by_key(|&(p, _)| p)
+                        .rev()
                     {
-                        vacant.insert(picoseconds + 1);
+                        println!(
+                            "There are {count} cheats that save {} picoseconds",
+                            shortest_without_cheat - p
+                        );
+                    }
+                    return found_cheats.len();
+                }
+                if position == self.end {
+                    // can't spread cheats
+                    // cheat can only be less than 20 in this case
+                    if !found_cheats.contains_key(&cheat) {
+                        found_cheats.insert(cheat, picoseconds);
+                        break;
+                    }
+                    // the ones we aren't counting are the ones that share some path with the one we do find
+                    // we're successfully finding all cheats that work, but none that aren't on a shortest path
+                    // from start to end...
+                    // new approach: find shortest path from S to A without cheating, and shortest path from B to E without cheating,
+                    // then count the number of cheat paths from A to B
+                }
+                for adjacent in self.adjacent(&position) {
+                    let cheat = match (
+                        self[&adjacent],
+                        cheat.is_empty(),
+                        cheat.len().cmp(&(CHEAT_LENGTH - 1)),
+                    ) {
+                        // if we're currently within a cheat, we must continue to cheat
+                        // if this is the last step of the cheat, self[adjacent] must be true
+                        (_, false, Ordering::Less)
+                        | (true, _, Ordering::Equal)
+                        | (false, true, _) => {
+                            let mut cheat = cheat.clone();
+                            cheat.push(adjacent.clone());
+                            // if cheat.len() == CHEAT_LENGTH && found_cheats.contains_key(&cheat) {
+                            //     continue;
+                            // }
+                            cheat
+                        }
+                        (true, _, _) => cheat.clone(),
+                        _ => continue,
+                    };
+                    // if visited[adjacent, cheat.len()] == picoseconds + 1 (or not visited)
+                    // then insert cheat into btreeset
+                    // then we'll catch all cheats that share a suffix with this one?
+                    if visited.insert((adjacent.clone(), cheat.len())) {
                         queue.push_back((adjacent, cheat, picoseconds + 1));
                     }
                 }
             }
         }
-        panic!()
     }
 }
 
