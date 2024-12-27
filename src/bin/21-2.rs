@@ -178,7 +178,15 @@ impl Length for One {
 }
 
 fn main() {
-    let mut memo = Memo::new(Memo::new(Memo::new(One)));
+    let mut memo = Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(
+        Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(
+            Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(
+                Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(Memo::new(
+                    Memo::new(Memo::new(One)),
+                )))))),
+            )))))),
+        )))))),
+    ))))));
     let result = stdin()
         .lines()
         .map(|line| {
