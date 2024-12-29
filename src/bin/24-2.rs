@@ -3,7 +3,7 @@ use std::{collections::HashMap, io::stdin, str::FromStr};
 use itertools::Itertools;
 use regex::Regex;
 use z3::{
-    ast::{forall_const, Ast, Bool, Datatype, Dynamic, BV},
+    ast::{forall_const, Array, Ast, Bool, Datatype, BV},
     Config, Context, DatatypeBuilder, DatatypeSort, FuncDecl, SatResult, Solver, Sort,
 };
 
@@ -121,7 +121,7 @@ impl<'ctx> Wires<'ctx> {
     }
 }
 
-const NUM_SWAPS: usize = 0; // 4
+const NUM_SWAPS: usize = 4;
 
 fn main() {
     let circuit = Circuit::parse();
@@ -144,7 +144,7 @@ fn main() {
         &wires.datatype.sort,
     );
     let permute_constraint = {
-        let x = Datatype::fresh_const(&ctx, "x", &wires.datatype.sort);
+        let x = Datatype::new_const(&ctx, "w", &wires.datatype.sort);
         let lhs = permute.apply(&[&x]).as_datatype().unwrap();
         let rhs = swaps.iter().fold(x.clone(), |e, (a, b)| {
             Bool::ite(&x._eq(a), b, &Bool::ite(&x._eq(b), a, &e))
@@ -152,21 +152,14 @@ fn main() {
         forall_const(&ctx, &[&x], &[], &lhs._eq(&rhs))
     };
     solver.assert(&permute_constraint);
-    let eval = FuncDecl::new(
+    let x = BV::new_const(&ctx, "x", circuit.input_bits);
+    let y = BV::new_const(&ctx, "y", circuit.input_bits);
+    let eval = Array::new_const(
         &ctx,
         "eval",
-        &[&wires.datatype.sort],
+        &wires.datatype.sort,
         &Sort::bitvector(&ctx, 1),
     );
-    let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
-    let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
-    let z = BV::fresh_const(&ctx, "z", circuit.input_bits); // + 1
-    for i in 0..z.get_size() {
-        // + 1
-        let wire = wires.construct(&format!("z{i:02}"));
-        let evaluated = eval.apply(&[&wire]).as_bv().unwrap();
-        solver.assert(&evaluated._eq(&z.extract(i, i)));
-    }
     let in_wire = |name: &str| {
         if let Some(i) = name.strip_prefix("x") {
             let i = i.parse().unwrap();
@@ -176,24 +169,30 @@ fn main() {
             y.extract(i, i)
         } else {
             let wire = wires.construct(name);
-            eval.apply(&[&wire]).as_bv().unwrap()
+            eval.select(&wire).as_bv().unwrap()
         }
     };
     let out_wire = |name: &str| {
         let wire = wires.construct(name);
         let permuted = permute.apply(&[&wire]).as_datatype().unwrap();
-        eval.apply(&[&permuted]).as_bv().unwrap()
+        eval.select(&permuted).as_bv().unwrap()
     };
     let mut gates = Bool::from_bool(&ctx, true);
     for (out, (in1, op, in2)) in circuit.gates() {
         gates &= op.eval(in_wire(&in1), in_wire(&in2))._eq(&out_wire(&out));
     }
-    let goal = x.bvand(&y)._eq(&z);
+    let mut sum = Bool::from_bool(&ctx, true);
+    let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
+    for i in 0..z.get_size() {
+        let wire = wires.construct(&format!("z{i:02}"));
+        let evaluated = eval.select(&wire).as_bv().unwrap();
+        sum &= evaluated._eq(&z.extract(i, i));
+    }
     solver.assert(&forall_const(
         &ctx,
-        &[&x, &y, &z],
+        &[&x, &y, &eval],
         &[],
-        &gates.implies(&goal),
+        &gates.implies(&sum),
     ));
     solver.check();
     let SatResult::Sat = solver.check() else {
@@ -201,6 +200,10 @@ fn main() {
     };
     let model = solver.get_model().unwrap();
     for (a, b) in swaps {
-        println!("{:?}<->{:?}", model.eval(&a, true), model.eval(&b, true));
+        println!(
+            "{:?}<->{:?}",
+            model.eval(&a, true).unwrap(),
+            model.eval(&b, true).unwrap()
+        );
     }
 }
