@@ -1,10 +1,17 @@
-use std::{collections::HashMap, io::stdin, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Display,
+    io::stdin,
+    iter::once,
+    str::FromStr,
+};
 
 use itertools::Itertools;
 use regex::Regex;
 use z3::{
     ast::{forall_const, Array, Ast, Bool, Datatype, BV},
-    Config, Context, DatatypeBuilder, DatatypeSort, FuncDecl, SatResult, Solver, Sort,
+    Config, Context, DatatypeBuilder, DatatypeSort, FuncDecl, Params, Pattern, SatResult, Solver,
+    Sort, Tactic,
 };
 
 #[derive(Clone)]
@@ -37,9 +44,27 @@ impl FromStr for Op {
     }
 }
 
+impl Display for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::And => write!(f, "&"),
+            Op::Or => write!(f, "|"),
+            Op::Xor => write!(f, "^"),
+        }
+    }
+}
+
 struct Circuit {
     input_bits: u32,
     gates: HashMap<String, (String, Op, String)>,
+}
+
+fn sort_key(name: &str) -> usize {
+    if let Some(i) = name.strip_prefix(&['x', 'y']) {
+        i.parse().unwrap()
+    } else {
+        1000
+    }
 }
 
 impl Circuit {
@@ -77,8 +102,11 @@ impl Circuit {
     }
 
     fn gates(&self) -> impl Iterator<Item = (&String, &(String, Op, String))> {
-        self.gates.iter()
+        self.gates
+            .iter()
+            .sorted_by_key(|(_, (a, _, b))| sort_key(a) + sort_key(b))
     }
+
     /*
     fn solve(&mut self) -> u64 {
         let mut gates = Bool::from_bool(self.ctx, true);
@@ -129,7 +157,8 @@ fn main() {
     let ctx = Context::new(&cfg);
     let wires = circuit.wires(&ctx);
     let solver = Solver::new(&ctx);
-    let swaps = (0..NUM_SWAPS * 2)
+
+    /*let swaps = (0..NUM_SWAPS * 2)
         .map(|_| Datatype::fresh_const(&ctx, "swap", &wires.datatype.sort))
         .tuples::<(_, _)>()
         .collect_vec();
@@ -137,73 +166,137 @@ fn main() {
         &ctx,
         &swaps.iter().flat_map(|(a, b)| [a, b]).collect_vec(),
     ));
+    match solver.check() {
+        SatResult::Sat => println!("SWAPS"),
+        result => panic!("{result:?}"),
+    }*/
+
     let permute = FuncDecl::new(
         &ctx,
         "permute",
         &[&wires.datatype.sort],
         &wires.datatype.sort,
     );
-    let permute_constraint = {
-        let x = Datatype::new_const(&ctx, "w", &wires.datatype.sort);
-        let lhs = permute.apply(&[&x]).as_datatype().unwrap();
-        let rhs = swaps.iter().fold(x.clone(), |e, (a, b)| {
-            Bool::ite(&x._eq(a), b, &Bool::ite(&x._eq(b), a, &e))
-        });
-        forall_const(&ctx, &[&x], &[], &lhs._eq(&rhs))
-    };
-    solver.assert(&permute_constraint);
-    let x = BV::new_const(&ctx, "x", circuit.input_bits);
-    let y = BV::new_const(&ctx, "y", circuit.input_bits);
-    let eval = Array::new_const(
-        &ctx,
-        "eval",
-        &wires.datatype.sort,
-        &Sort::bitvector(&ctx, 1),
-    );
-    let in_wire = |name: &str| {
-        if let Some(i) = name.strip_prefix("x") {
-            let i = i.parse().unwrap();
-            x.extract(i, i)
-        } else if let Some(i) = name.strip_prefix("y") {
-            let i = i.parse().unwrap();
-            y.extract(i, i)
-        } else {
-            let wire = wires.construct(name);
-            eval.select(&wire).as_bv().unwrap()
-        }
-    };
-    let out_wire = |name: &str| {
-        let wire = wires.construct(name);
-        let permuted = permute.apply(&[&wire]).as_datatype().unwrap();
-        eval.select(&permuted).as_bv().unwrap()
-    };
-    let mut gates = Bool::from_bool(&ctx, true);
-    for (out, (in1, op, in2)) in circuit.gates() {
-        gates &= op.eval(in_wire(&in1), in_wire(&in2))._eq(&out_wire(&out));
-    }
-    let mut sum = Bool::from_bool(&ctx, true);
-    let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
-    for i in 0..z.get_size() {
-        let wire = wires.construct(&format!("z{i:02}"));
-        let evaluated = eval.select(&wire).as_bv().unwrap();
-        sum &= evaluated._eq(&z.extract(i, i));
-    }
+    /*let a = Datatype::fresh_const(&ctx, "a", &wires.datatype.sort);
     solver.assert(&forall_const(
         &ctx,
-        &[&x, &y, &eval],
+        &[&a],
         &[],
-        &gates.implies(&sum),
+        &permute
+            .apply(&[&permute.apply(&[&a])])
+            .as_datatype()
+            .unwrap()
+            ._eq(&a),
+    ));*/
+    /*let w = Datatype::fresh_const(&ctx, "w", &wires.datatype.sort);
+    let applied = permute.apply(&[&w]).as_datatype().unwrap();
+    solver.assert(&forall_const(
+        &ctx,
+        &[&w],
+        &[],
+        &swaps.iter().fold(applied._eq(&w), |acc, (a, b)| {
+            Bool::ite(
+                &w._eq(&a),
+                &applied._eq(&b),
+                &Bool::ite(&w._eq(&b), &applied._eq(&a), &acc),
+            )
+        }),
     ));
-    solver.check();
-    let SatResult::Sat = solver.check() else {
-        panic!()
-    };
+    match solver.check() {
+        SatResult::Sat => print!("PERMUTE"),
+        result => panic!("{result:?}"),
+    }*/
+
+    let eval = FuncDecl::new(
+        &ctx,
+        "eval",
+        &[
+            &Sort::bitvector(&ctx, circuit.input_bits),
+            &Sort::bitvector(&ctx, circuit.input_bits),
+            &wires.datatype.sort,
+        ],
+        &Sort::bitvector(&ctx, 1),
+    );
+
+    let mut i = 0;
+    for (out, (in1, op, in2)) in circuit.gates() {
+        let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
+        let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
+        let in_wire = |name: &str| {
+            if let Some(i) = name.strip_prefix("x") {
+                let i = i.parse().unwrap();
+                x.extract(i, i)
+            } else if let Some(i) = name.strip_prefix("y") {
+                let i = i.parse().unwrap();
+                y.extract(i, i)
+            } else {
+                let wire = wires.construct(name);
+                eval.apply(&[&x, &y, &wire]).as_bv().unwrap()
+            }
+        };
+        let out = wires.construct(&out);
+        let quantified = eval
+            .apply(&[&x, &y, &permute.apply(&[&out])])
+            .as_bv()
+            .unwrap()
+            ._eq(&op.eval(in_wire(&in1), in_wire(&in2)));
+        solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
+        match solver.check() {
+            SatResult::Sat => println!("GATE {out} from {in1}, {in2}"),
+            result => panic!("{result:?}"),
+        }
+        let zs = (sort_key(&in1) + sort_key(&in2)) as u32 / 2;
+        if zs <= circuit.input_bits && i < zs {
+            let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
+            let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
+            let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
+            let out = wires.construct(&format!("z{i:02}"));
+            let quantified = eval
+                .apply(&[&x, &y, &out])
+                .as_bv()
+                .unwrap()
+                ._eq(&z.extract(i, i));
+            solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
+            match solver.check() {
+                SatResult::Sat => println!("ZZZZ {out}"),
+                result => panic!("{result:?}"),
+            }
+            i += 1;
+        }
+    }
+
+    for i in 0..circuit.input_bits + 1 {
+        let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
+        let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
+        let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
+        let out = wires.construct(&format!("z{i:02}"));
+        let quantified = eval
+            .apply(&[&x, &y, &out])
+            .as_bv()
+            .unwrap()
+            ._eq(&z.extract(i, i));
+        solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
+    }
+    match solver.check() {
+        SatResult::Sat => println!("Solved."),
+        result => panic!("{result:?}"),
+    }
+
     let model = solver.get_model().unwrap();
-    for (a, b) in swaps {
+    for variant in wires.datatype.variants.iter() {
+        let wire = variant.constructor.apply(&[]);
+        let permuted = permute.apply(&[&wire]);
+        println!(
+            "{:?} -> {:?}",
+            model.eval(&wire, true).unwrap(),
+            model.eval(&permuted, true).unwrap()
+        );
+    }
+    /*for (a, b) in swaps {
         println!(
             "{:?}<->{:?}",
             model.eval(&a, true).unwrap(),
             model.eval(&b, true).unwrap()
         );
-    }
+    }*/
 }
