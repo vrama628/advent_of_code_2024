@@ -9,7 +9,7 @@ use std::{
 use itertools::Itertools;
 use regex::Regex;
 use z3::{
-    ast::{forall_const, Array, Ast, Bool, Datatype, BV},
+    ast::{exists_const, forall_const, Array, Ast, Bool, Datatype, BV},
     Config, Context, DatatypeBuilder, DatatypeSort, FuncDecl, Params, Pattern, SatResult, Solver,
     Sort, Tactic,
 };
@@ -59,14 +59,6 @@ struct Circuit {
     gates: HashMap<String, (String, Op, String)>,
 }
 
-fn sort_key(name: &str) -> usize {
-    if let Some(i) = name.strip_prefix(&['x', 'y']) {
-        i.parse().unwrap()
-    } else {
-        1000
-    }
-}
-
 impl Circuit {
     fn parse() -> Self {
         let mut lines = stdin().lines().map(Result::unwrap);
@@ -82,6 +74,15 @@ impl Circuit {
             })
             .collect();
         Self { input_bits, gates }
+    }
+
+    fn sort_key(&self, name: &str) -> usize {
+        if let Some(i) = name.strip_prefix(&['x', 'y']) {
+            i.parse().unwrap()
+        } else {
+            let (a, _, b) = &self.gates[name];
+            1000 + self.sort_key(a).max(self.sort_key(b))
+        }
     }
 
     fn wires<'ctx>(&self, ctx: &'ctx Context) -> Wires<'ctx> {
@@ -104,7 +105,7 @@ impl Circuit {
     fn gates(&self) -> impl Iterator<Item = (&String, &(String, Op, String))> {
         self.gates
             .iter()
-            .sorted_by_key(|(_, (a, _, b))| sort_key(a) + sort_key(b))
+            .sorted_by_key(|(_, (a, _, b))| self.sort_key(a) + self.sort_key(b))
     }
 
     /*
@@ -149,7 +150,7 @@ impl<'ctx> Wires<'ctx> {
     }
 }
 
-const NUM_SWAPS: usize = 4;
+const NUM_SWAPS: usize = 1;
 
 fn main() {
     let circuit = Circuit::parse();
@@ -158,26 +159,59 @@ fn main() {
     let wires = circuit.wires(&ctx);
     let solver = Solver::new(&ctx);
 
-    /*let swaps = (0..NUM_SWAPS * 2)
+    let swaps = (0..NUM_SWAPS * 2)
         .map(|_| Datatype::fresh_const(&ctx, "swap", &wires.datatype.sort))
         .tuples::<(_, _)>()
         .collect_vec();
-    solver.assert(&Ast::distinct(
+    /*solver.assert(&Ast::distinct(
         &ctx,
         &swaps.iter().flat_map(|(a, b)| [a, b]).collect_vec(),
-    ));
-    match solver.check() {
+    ));*/
+    let swap = FuncDecl::new(
+        &ctx,
+        "swap",
+        &[&wires.datatype.sort, &wires.datatype.sort],
+        &Sort::bool(&ctx),
+    );
+    /*for (a, b) in &swaps {
+        solver.assert(&swap.apply(&[a, b]).as_bool().unwrap());
+        solver.assert(&swap.apply(&[b, a]).as_bool().unwrap());
+    }
+    {
+        let a = Datatype::fresh_const(&ctx, "a", &wires.datatype.sort);
+        let b = Datatype::fresh_const(&ctx, "b", &wires.datatype.sort);
+        let disjunction = swaps
+            .iter()
+            .flat_map(|(s1, s2)| {
+                [
+                    Bool::and(&ctx, &[&a._eq(s1), &b._eq(s2)]),
+                    Bool::and(&ctx, &[&b._eq(s1), &a._eq(s2)]),
+                ]
+            })
+            .collect_vec();
+        solver.assert(&forall_const(
+            &ctx,
+            &[&a, &b],
+            &[&Pattern::new(&ctx, &[&swap.apply(&[&a, &b])])],
+            &(swap
+                .apply(&[&a, &b])
+                .as_bool()
+                .unwrap()
+                .implies(&Bool::or(&ctx, &disjunction.iter().collect_vec()))),
+        ));
+    }*/
+    /*match solver.check() {
         SatResult::Sat => println!("SWAPS"),
         result => panic!("{result:?}"),
     }*/
 
-    let permute = FuncDecl::new(
+    /*let permute = FuncDecl::new(
         &ctx,
         "permute",
         &[&wires.datatype.sort],
         &wires.datatype.sort,
     );
-    /*let a = Datatype::fresh_const(&ctx, "a", &wires.datatype.sort);
+    let a = Datatype::fresh_const(&ctx, "a", &wires.datatype.sort);
     solver.assert(&forall_const(
         &ctx,
         &[&a],
@@ -187,8 +221,8 @@ fn main() {
             .as_datatype()
             .unwrap()
             ._eq(&a),
-    ));*/
-    /*let w = Datatype::fresh_const(&ctx, "w", &wires.datatype.sort);
+    ));
+    let w = Datatype::fresh_const(&ctx, "w", &wires.datatype.sort);
     let applied = permute.apply(&[&w]).as_datatype().unwrap();
     solver.assert(&forall_const(
         &ctx,
@@ -235,18 +269,46 @@ fn main() {
             }
         };
         let out = wires.construct(&out);
-        let quantified = eval
-            .apply(&[&x, &y, &permute.apply(&[&out])])
-            .as_bv()
-            .unwrap()
-            ._eq(&op.eval(in_wire(&in1), in_wire(&in2)));
-        solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
+        let quantified = {
+            let s = Datatype::fresh_const(&ctx, "s", &wires.datatype.sort);
+            let gate = op.eval(in_wire(&in1), in_wire(&in2));
+            Bool::or(
+                &ctx,
+                &[
+                    &forall_const(
+                        &ctx,
+                        &[&x, &y],
+                        &[],
+                        &eval.apply(&[&x, &y, &out]).as_bv().unwrap()._eq(&gate),
+                    ),
+                    &exists_const(
+                        &ctx,
+                        &[&s],
+                        &[],
+                        &Bool::and(
+                            &ctx,
+                            &[
+                                &swap.apply(&[&out, &s]).as_bool().unwrap(),
+                                &forall_const(
+                                    &ctx,
+                                    &[&x, &y],
+                                    &[],
+                                    &eval.apply(&[&x, &y, &s]).as_bv().unwrap()._eq(&gate),
+                                ),
+                            ],
+                        ),
+                    ),
+                ],
+            )
+        };
+        solver.assert(&quantified);
+        println!("TRYING {out} from {in1}, {in2}...");
         match solver.check() {
             SatResult::Sat => println!("GATE {out} from {in1}, {in2}"),
             result => panic!("{result:?}"),
         }
-        let zs = (sort_key(&in1) + sort_key(&in2)) as u32 / 2;
-        if zs <= circuit.input_bits && i < zs {
+        let zs = (circuit.sort_key(&in1) + circuit.sort_key(&in2)) as u32 / 2;
+        if i < circuit.input_bits && i < zs {
             let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
             let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
             let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
@@ -265,7 +327,7 @@ fn main() {
         }
     }
 
-    for i in 0..circuit.input_bits + 1 {
+    for i in i..circuit.input_bits + 1 {
         let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
         let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
         let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
@@ -277,19 +339,18 @@ fn main() {
             ._eq(&z.extract(i, i));
         solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
     }
+    println!("Solving...");
     match solver.check() {
         SatResult::Sat => println!("Solved."),
         result => panic!("{result:?}"),
     }
 
     let model = solver.get_model().unwrap();
-    for variant in wires.datatype.variants.iter() {
-        let wire = variant.constructor.apply(&[]);
-        let permuted = permute.apply(&[&wire]);
+    for (a, b) in swaps {
         println!(
-            "{:?} -> {:?}",
-            model.eval(&wire, true).unwrap(),
-            model.eval(&permuted, true).unwrap()
+            "{:?} <-> {:?}",
+            model.eval(&a, true).unwrap(),
+            model.eval(&b, true).unwrap()
         );
     }
     /*for (a, b) in swaps {
