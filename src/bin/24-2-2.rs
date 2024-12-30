@@ -100,71 +100,20 @@ impl Circuit {
     }
 
     fn behavior(&self, gate: &str) -> Result<Behavior, String> {
-        if let Some(i) = gate.strip_prefix('x') {
-            Ok(Behavior::X(i.parse().unwrap()))
-        } else if let Some(i) = gate.strip_prefix('y') {
-            Ok(Behavior::Y(i.parse().unwrap()))
+        if let Some(x) = gate.strip_prefix('x') {
+            let x: usize = x.parse().unwrap();
+            Ok(Behavior::X(x))
+        } else if let Some(y) = gate.strip_prefix('y') {
+            let y: usize = y.parse().unwrap();
+            Ok(Behavior::Y(y))
         } else {
             let (a, op, b) = &self.gates[gate];
-            match (self.behavior(a)?, op, self.behavior(b)?) {
-                (Behavior::X(0), Op::Xor, Behavior::Y(0))
-                | (Behavior::Y(0), Op::Xor, Behavior::X(0)) => Ok(Behavior::Z(0)),
-                (Behavior::X(0), Op::And, Behavior::Y(0))
-                | (Behavior::Y(0), Op::And, Behavior::Y(0)) => Ok(Behavior::Carry(0)),
-                (Behavior::Xor(p, q), Op::Xor, r) | (r, Op::Xor, Behavior::Xor(p, q)) => {
-                    let mut operands = vec![*p, *q, r];
-                    operands.sort();
-                    match operands[..] {
-                        [Behavior::X(xi), Behavior::Y(yi), Behavior::Carry(zi)] => {
-                            if xi == yi && xi == zi + 1 && yi == zi + 1 {
-                                Ok(Behavior::Z(xi))
-                            } else {
-                                Err(format!("{gate}: Almost Z: {:?}", operands))
-                            }
-                        }
-                        _ => {
-                            for op in &operands {
-                                println!("  {op}");
-                            }
-                            Err(format!("{gate}: Not close Z: {:?}", operands))
-                        }
-                    }
-                }
-                (Behavior::And(_, _), Op::Xor, _) | (_, Op::Xor, Behavior::And(_, _)) => {
-                    Err(format!("{gate}: AND in XOR"))
-                }
-                (Behavior::Or(_, _), Op::Xor, _) | (_, Op::Xor, Behavior::Or(_, _)) => {
-                    Err(format!("{gate}: OR in XOR"))
-                }
-                (Behavior::Or(p, q), Op::Or, r) | (r, Op::Or, Behavior::Or(p, q)) => {
-                    let mut operands = vec![*p, *q, r];
-                    operands.sort();
-                    match operands[..] {
-                        [Behavior::And(ref l1, ref r1), Behavior::And(ref l2, ref r2), Behavior::And(ref l3, ref r3)] => {
-                            Err(format!(
-                                "TODO: Recognize Carry {l1:?} & {r1:?} | {l2:?} & {r2:?} | {l3:?} & {r3:?}"
-                            ))
-                        }
-                        _ => Err(format!("{gate}: Not close Carry: {:?}", operands)),
-                    }
-                }
-                (Behavior::Or(p, q), Op::And, r) | (r, Op::And, Behavior::Or(p, q)) => {
-                    let mut operands = vec![*p, *q, r];
-                    operands.sort();
-                    match operands[..] {
-                        [Behavior::X(xi), Behavior::Y(yi), Behavior::Carry(zi)] => {
-                            if xi == yi && xi == zi && yi == zi {
-                                Ok(Behavior::Carry(xi))
-                            } else {
-                                Err(format!("{gate}: Almost Carry: {:?}", operands))
-                            }
-                        }
-                        _ => Err(format!("{gate}: Not close Carry: {:?}", operands)),
-                    }
-                }
-                (a, Op::Xor, b) => Ok(Behavior::Xor(Box::new(a), Box::new(b))),
-                (a, Op::And, b) => Ok(Behavior::And(Box::new(a), Box::new(b))),
-                (a, Op::Or, b) => Ok(Behavior::Or(Box::new(a), Box::new(b))),
+            let a = self.behavior(a)?;
+            let b = self.behavior(b)?;
+            match op {
+                Op::And => Behavior::And(Box::new(a), Box::new(b)).normalize(),
+                Op::Or => Behavior::Or(Box::new(a), Box::new(b)).normalize(),
+                Op::Xor => Behavior::Xor(Box::new(a), Box::new(b)).normalize(),
             }
         }
     }
@@ -178,7 +127,7 @@ fn mode<I: IntoIterator<Item = usize>>(iterator: I) -> usize {
 a & b | b & c | c & a == a & (b | c) | b & c
 */
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
 enum Behavior {
     X(usize),
     Y(usize),
@@ -195,16 +144,82 @@ struct Valuation {
     c: bool,
 }
 
+impl From<u8> for Valuation {
+    fn from(value: u8) -> Self {
+        if value >= 8 {
+            panic!()
+        }
+        let x = ((value >> 0) & 1) == 1;
+        let y = ((value >> 1) & 1) == 1;
+        let c = ((value >> 2) & 1) == 1;
+        Self { x, y, c }
+    }
+}
+
 impl Behavior {
-    fn eval(&self, i: usize, &Valuation { x, y, c }: &Valuation) -> Result<bool, String> {
+    fn digit(&self) -> Result<usize, String> {
         match self {
-            Behavior::X(_) => todo!(),
-            Behavior::Y(_) => todo!(),
-            Behavior::Z(_) => Err("unexpected Z".to_owned()),
-            Behavior::Carry(_) => todo!(),
-            Behavior::And(behavior, behavior1) => todo!(),
-            Behavior::Or(behavior, behavior1) => todo!(),
-            Behavior::Xor(behavior, behavior1) => todo!(),
+            Behavior::X(i) | Behavior::Y(i) | Behavior::Z(i) => Ok(*i),
+            Behavior::Carry(i) => Ok(*i + 1),
+            Behavior::And(a, b) | Behavior::Or(a, b) | Behavior::Xor(a, b) => {
+                let a = a.digit()?;
+                let b = b.digit()?;
+                if a != b {
+                    Err(format!("digit mismatch in {self}"))
+                } else {
+                    Ok(a)
+                }
+            }
+        }
+    }
+
+    fn normalize(&self) -> Result<Self, String> {
+        let i = self.digit()?;
+        match self.blast(i)? {
+            0b11101000 => Ok(Self::Carry(i)),
+            0b10010110 => Ok(Self::Z(i)),
+            0b10001000 if i == 0 => Ok(Self::Carry(0)),
+            0b01100110 if i == 0 => Ok(Self::Z(0)),
+            _ => Ok(self.clone()),
+        }
+    }
+
+    fn blast(&self, i: usize) -> Result<u8, String> {
+        let mut res = 0;
+        for v in 0..8 {
+            res |= ((self.eval(i, &v.into())?) as u8) << v;
+        }
+        Ok(res)
+    }
+
+    fn eval(&self, i: usize, valuation: &Valuation) -> Result<bool, String> {
+        let err = || Err(format!("Encountered {self} when evaluating {i:02}"));
+        match self {
+            Behavior::X(xi) => {
+                if *xi == i {
+                    Ok(valuation.x)
+                } else {
+                    err()
+                }
+            }
+            Behavior::Y(yi) => {
+                if *yi == i {
+                    Ok(valuation.y)
+                } else {
+                    err()
+                }
+            }
+            Behavior::Z(_) => err(),
+            Behavior::Carry(ci) => {
+                if *ci + 1 == i {
+                    Ok(valuation.c)
+                } else {
+                    err()
+                }
+            }
+            Behavior::And(a, b) => Ok(a.eval(i, valuation)? & b.eval(i, valuation)?),
+            Behavior::Or(a, b) => Ok(a.eval(i, valuation)? | b.eval(i, valuation)?),
+            Behavior::Xor(a, b) => Ok(a.eval(i, valuation)? ^ b.eval(i, valuation)?),
         }
     }
 }
