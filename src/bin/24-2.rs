@@ -65,6 +65,7 @@ impl Circuit {
         let total_input_bits = lines.by_ref().take_while(|line| !line.is_empty()).count();
         debug_assert_eq!(total_input_bits % 2, 0);
         let input_bits = (total_input_bits / 2) as u32;
+        let input_bits = 9;
         let regex = Regex::new(r"(\w+) (AND|OR|XOR) (\w+) -> (\w+)").unwrap();
         let gates = lines
             .map(|line| {
@@ -87,7 +88,7 @@ impl Circuit {
 
     fn sort_key(&self, (out, (in1, _, in2)): (&String, &(String, Op, String))) -> usize {
         if let Some(i) = out.strip_prefix('z') {
-            i.parse::<usize>().unwrap() * 2 + 100
+            i.parse::<usize>().unwrap() * 2
         } else {
             self.sort_key_in(in1) + self.sort_key_in(in2)
         }
@@ -156,7 +157,7 @@ impl<'ctx> Wires<'ctx> {
     }
 }
 
-const NUM_SWAPS: usize = 4;
+const NUM_SWAPS: usize = 1;
 
 fn main() {
     let circuit = Circuit::parse();
@@ -169,10 +170,10 @@ fn main() {
         .map(|_| Datatype::fresh_const(&ctx, "swap", &wires.datatype.sort))
         .tuples::<(_, _)>()
         .collect_vec();
-    solver.assert(&Ast::distinct(
+    /*solver.assert(&Ast::distinct(
         &ctx,
         &swaps.iter().flat_map(|(a, b)| [a, b]).collect_vec(),
-    ));
+    ));*/
     /*let swap = FuncDecl::new(
         &ctx,
         "swap",
@@ -281,7 +282,25 @@ fn main() {
         &Sort::bitvector(&ctx, 1),
     );
 
-    let mut i = 0;
+    for i in 0..46 {
+        //circuit.input_bits + 1
+        let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
+        let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
+        let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
+        let value = if i <= circuit.input_bits {
+            z.extract(i, i)
+        } else {
+            BV::from_u64(&ctx, 0, 1)
+        };
+        let out = wires.construct(&format!("z{i:02}"));
+        let quantified = eval.apply(&[&x, &y, &out]).as_bv().unwrap()._eq(&value);
+        solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
+        match solver.check() {
+            SatResult::Sat => println!("INITIAL z{i:02}"),
+            result => panic!("{result:?}"),
+        }
+    }
+
     for g @ (out, (in1, op, in2)) in circuit.gates() {
         let quantified = {
             let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
@@ -289,10 +308,18 @@ fn main() {
             let in_wire = |name: &str| {
                 if let Some(i) = name.strip_prefix("x") {
                     let i = i.parse().unwrap();
-                    x.extract(i, i)
+                    if i < circuit.input_bits {
+                        x.extract(i, i)
+                    } else {
+                        BV::from_u64(&ctx, 0, 1)
+                    }
                 } else if let Some(i) = name.strip_prefix("y") {
                     let i = i.parse().unwrap();
-                    y.extract(i, i)
+                    if i < circuit.input_bits {
+                        y.extract(i, i)
+                    } else {
+                        BV::from_u64(&ctx, 0, 1)
+                    }
                 } else {
                     let wire = wires.construct(name);
                     eval.apply(&[&x, &y, &wire]).as_bv().unwrap()
@@ -334,38 +361,8 @@ fn main() {
             SatResult::Sat => println!("GATE {out} from {in1}, {in2}"),
             result => panic!("{result:?}"),
         }
-        let zs = (circuit.sort_key(g)) as u32 / 2;
-        if i < circuit.input_bits && i < zs {
-            let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
-            let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
-            let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
-            let out = wires.construct(&format!("z{i:02}"));
-            let quantified = eval
-                .apply(&[&x, &y, &out])
-                .as_bv()
-                .unwrap()
-                ._eq(&z.extract(i, i));
-            solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
-            match solver.check() {
-                SatResult::Sat => println!("ZZZZ {out}"),
-                result => panic!("{result:?}"),
-            }
-            i += 1;
-        }
     }
 
-    for i in i..circuit.input_bits + 1 {
-        let x = BV::fresh_const(&ctx, "x", circuit.input_bits);
-        let y = BV::fresh_const(&ctx, "y", circuit.input_bits);
-        let z = x.zero_ext(1).bvadd(&y.zero_ext(1));
-        let out = wires.construct(&format!("z{i:02}"));
-        let quantified = eval
-            .apply(&[&x, &y, &out])
-            .as_bv()
-            .unwrap()
-            ._eq(&z.extract(i, i));
-        solver.assert(&forall_const(&ctx, &[&x, &y], &[], &quantified));
-    }
     println!("Solving...");
     match solver.check() {
         SatResult::Sat => println!("Solved."),
