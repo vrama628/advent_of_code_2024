@@ -100,7 +100,7 @@ impl Circuit {
         for i in 0..=INPUT_BITS {
             match self.behavior(OrdSet::new(), &format!("z{i:02}")) {
                 Ok(Behavior::Z(z)) if z == i => (),
-                e => {
+                _ => {
                     if let Some(last_error) = last_error.replace(i) {
                         let reachable_a = self.reachable_from(&format!("z{last_error:02}"));
                         let reachable_b = self.reachable_from(&format!("z{i:02}"));
