@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, fmt::Display, io::stdin, str::FromStr, vec};
 
+use im::OrdSet;
+use itertools::Itertools;
 use regex::Regex;
 
 #[derive(Clone)]
@@ -26,7 +28,6 @@ const INPUT_BITS: usize = 45;
 
 #[derive(Clone)]
 struct Circuit {
-    input_bits: usize,
     gates: BTreeMap<String, (String, Op, String)>,
 }
 
@@ -36,6 +37,7 @@ impl Circuit {
         let input_bits = lines.by_ref().take_while(|line| !line.is_empty()).count();
         debug_assert_eq!(input_bits % 2, 0);
         let input_bits = input_bits / 2;
+        debug_assert_eq!(input_bits, INPUT_BITS);
         let regex = Regex::new(r"(\w+) (AND|OR|XOR) (\w+) -> (\w+)").unwrap();
         let gates = lines
             .map(|line| {
@@ -46,10 +48,14 @@ impl Circuit {
                 )
             })
             .collect();
-        Self { input_bits, gates }
+        Self { gates }
     }
 
-    fn behavior(&self, gate: &str) -> Result<Behavior, String> {
+    fn behavior(&self, seen: OrdSet<String>, gate: &str) -> Result<Behavior, String> {
+        if seen.contains(gate) {
+            return Err("cycle".to_owned());
+        }
+        let seen = seen.update(gate.to_owned());
         if let Some(x) = gate.strip_prefix('x') {
             let x: usize = x.parse().unwrap();
             Ok(Behavior::X(x))
@@ -58,8 +64,8 @@ impl Circuit {
             Ok(Behavior::Y(y))
         } else {
             let (a, op, b) = &self.gates[gate];
-            let a_behavior = self.behavior(a)?;
-            let b_behavior = self.behavior(b)?;
+            let a_behavior = self.behavior(seen.clone(), a)?;
+            let b_behavior = self.behavior(seen, b)?;
             match op {
                 Op::And => Behavior::And(Box::new(a_behavior), Box::new(b_behavior)).normalize(),
                 Op::Or => Behavior::Or(Box::new(a_behavior), Box::new(b_behavior)).normalize(),
@@ -73,6 +79,53 @@ impl Circuit {
         let b_gate = self.gates.insert(b.to_owned(), a_gate).unwrap();
         let none = self.gates.insert(a.to_owned(), b_gate);
         debug_assert!(none.is_none())
+    }
+
+    fn reachable_from(&self, gate: &str) -> Vec<String> {
+        match self.behavior(OrdSet::new(), gate) {
+            Ok(Behavior::X(_) | Behavior::Y(_)) => vec![],
+            Ok(Behavior::Carry(_) | Behavior::Z(_)) => vec![gate.to_owned()],
+            Ok(Behavior::And(_, _) | Behavior::Or(_, _) | Behavior::Xor(_, _)) | Err(_) => {
+                let (a, _, b) = &self.gates[gate];
+                let mut res = vec![gate.to_owned()];
+                res.extend(self.reachable_from(a));
+                res.extend(self.reachable_from(b));
+                res
+            }
+        }
+    }
+
+    fn solve(&self) -> Vec<(String, String)> {
+        let mut last_error = None;
+        for i in 0..=INPUT_BITS {
+            match self.behavior(OrdSet::new(), &format!("z{i:02}")) {
+                Ok(Behavior::Z(z)) if z == i => (),
+                e => {
+                    if let Some(last_error) = last_error.replace(i) {
+                        let reachable_a = self.reachable_from(&format!("z{last_error:02}"));
+                        let reachable_b = self.reachable_from(&format!("z{i:02}"));
+                        for (a, b) in reachable_a.into_iter().cartesian_product(reachable_b) {
+                            if a == b {
+                                continue;
+                            }
+                            let mut circuit = self.clone();
+                            circuit.swap(&a, &b);
+                            match circuit.behavior(OrdSet::new(), &format!("z{last_error:02}")) {
+                                Ok(Behavior::Z(z)) if z == last_error => {
+                                    println!("succeeded with swapping {a} and {b}!");
+                                    let mut res = circuit.solve();
+                                    res.push((a, b));
+                                    return res;
+                                }
+                                _ => (),
+                            }
+                        }
+                        panic!()
+                    }
+                }
+            }
+        }
+        vec![]
     }
 }
 
@@ -190,29 +243,12 @@ impl Display for Behavior {
 }
 
 fn main() {
-    let mut circuit = Circuit::parse();
-    circuit.swap("z08", "cdj");
-    circuit.swap("z16", "mrb");
-    circuit.swap("z32", "gfm");
-    circuit.swap("dhm", "qjd");
-    for i in 0..=circuit.input_bits {
-        match circuit.behavior(&format!("z{i:02}")) {
-            Err(e) => {
-                println!("ERROR: on z{i:02}: {e}");
-            }
-            Ok(Behavior::Z(zi)) => {
-                if zi == i {
-                    println!("Everything from z{i:02} is FINE");
-                } else {
-                    println!("Expected z{i:02}, got z{zi:02}");
-                }
-            }
-            Ok(b) => {
-                println!("Expected z{i:02}, got {b}");
-            }
-        }
-    }
-    let mut res = vec!["z08", "cdj", "z16", "mrb", "z32", "gfm", "dhm", "qjd"];
-    res.sort();
-    println!("{}", res.join(","));
+    let circuit = Circuit::parse();
+    let result = circuit
+        .solve()
+        .into_iter()
+        .flat_map(|(a, b)| [a, b])
+        .sorted()
+        .join(",");
+    println!("{result}");
 }
