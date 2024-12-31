@@ -1,6 +1,5 @@
-use std::{backtrace, collections::BTreeMap, fmt::Display, io::stdin, str::FromStr, vec};
+use std::{collections::BTreeMap, fmt::Display, io::stdin, str::FromStr, vec};
 
-use im::OrdSet;
 use regex::Regex;
 
 #[derive(Clone)]
@@ -8,16 +7,6 @@ enum Op {
     And,
     Or,
     Xor,
-}
-
-impl Op {
-    fn eval(&self, a: bool, b: bool) -> bool {
-        match self {
-            Op::And => a & b,
-            Op::Or => a | b,
-            Op::Xor => a ^ b,
-        }
-    }
 }
 
 impl FromStr for Op {
@@ -33,6 +22,9 @@ impl FromStr for Op {
     }
 }
 
+const INPUT_BITS: usize = 45;
+
+#[derive(Clone)]
 struct Circuit {
     input_bits: usize,
     gates: BTreeMap<String, (String, Op, String)>,
@@ -57,48 +49,6 @@ impl Circuit {
         Self { input_bits, gates }
     }
 
-    fn reachable_from(&self, wire: &str, z: usize) -> OrdSet<String> {
-        if let Some(i) = wire.strip_prefix(['x', 'y']) {
-            let i: usize = i.parse().unwrap();
-            if i > z {
-                println!("ANOMALY: {wire} is reachable from z{z:02}");
-            }
-            OrdSet::unit(wire.to_owned())
-        } else {
-            let (a, _, b) = &self.gates[wire];
-            self.reachable_from(a, z)
-                .union(self.reachable_from(b, z))
-                .update(wire.to_owned())
-        }
-    }
-
-    fn detect_anomalies(&self) {
-        let mut prev_reachable = OrdSet::new();
-        for z in 0..self.input_bits {
-            let reachable = self.reachable_from(&format!("z{z:02}"), z);
-            for xy in 0..z {
-                if !reachable.contains(&format!("x{:02}", xy)) {
-                    println!("ANOMALY: x{xy:02} is not reachable from z{z:02}");
-                }
-                if !reachable.contains(&format!("y{:02}", xy)) {
-                    println!("ANOMALY: y{xy:02} is not reachable from z{z:02}");
-                }
-            }
-            for prev in prev_reachable
-                .clone()
-                .relative_complement(reachable.clone())
-            {
-                if prev != format!("z{:02}", z - 1) {
-                    println!(
-                        "NOTE: {prev} was reachable from z{:02} but not from z{z:02}",
-                        z - 1
-                    );
-                }
-            }
-            prev_reachable = reachable;
-        }
-    }
-
     fn behavior(&self, gate: &str) -> Result<Behavior, String> {
         if let Some(x) = gate.strip_prefix('x') {
             let x: usize = x.parse().unwrap();
@@ -108,24 +58,23 @@ impl Circuit {
             Ok(Behavior::Y(y))
         } else {
             let (a, op, b) = &self.gates[gate];
-            let a = self.behavior(a)?;
-            let b = self.behavior(b)?;
+            let a_behavior = self.behavior(a)?;
+            let b_behavior = self.behavior(b)?;
             match op {
-                Op::And => Behavior::And(Box::new(a), Box::new(b)).normalize(),
-                Op::Or => Behavior::Or(Box::new(a), Box::new(b)).normalize(),
-                Op::Xor => Behavior::Xor(Box::new(a), Box::new(b)).normalize(),
+                Op::And => Behavior::And(Box::new(a_behavior), Box::new(b_behavior)).normalize(),
+                Op::Or => Behavior::Or(Box::new(a_behavior), Box::new(b_behavior)).normalize(),
+                Op::Xor => Behavior::Xor(Box::new(a_behavior), Box::new(b_behavior)).normalize(),
             }
         }
     }
-}
 
-fn mode<I: IntoIterator<Item = usize>>(iterator: I) -> usize {
-    todo!()
+    fn swap(&mut self, a: &str, b: &str) {
+        let a_gate = self.gates.remove(a).unwrap();
+        let b_gate = self.gates.insert(b.to_owned(), a_gate).unwrap();
+        let none = self.gates.insert(a.to_owned(), b_gate);
+        debug_assert!(none.is_none())
+    }
 }
-
-/*
-a & b | b & c | c & a == a & (b | c) | b & c
-*/
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
 enum Behavior {
@@ -159,7 +108,8 @@ impl From<u8> for Valuation {
 impl Behavior {
     fn digit(&self) -> Result<usize, String> {
         match self {
-            Behavior::X(i) | Behavior::Y(i) | Behavior::Z(i) => Ok(*i),
+            Behavior::X(i) | Behavior::Y(i) => Ok(*i),
+            Behavior::Z(i) => Err(format!("Encountered z{i:02} when getting digit")),
             Behavior::Carry(i) => Ok(*i + 1),
             Behavior::And(a, b) | Behavior::Or(a, b) | Behavior::Xor(a, b) => {
                 let a = a.digit()?;
@@ -176,6 +126,7 @@ impl Behavior {
     fn normalize(&self) -> Result<Self, String> {
         let i = self.digit()?;
         match self.blast(i)? {
+            0b11101000 if i == INPUT_BITS - 1 => Ok(Self::Z(INPUT_BITS)),
             0b11101000 => Ok(Self::Carry(i)),
             0b10010110 => Ok(Self::Z(i)),
             0b10001000 if i == 0 => Ok(Self::Carry(0)),
@@ -193,7 +144,7 @@ impl Behavior {
     }
 
     fn eval(&self, i: usize, valuation: &Valuation) -> Result<bool, String> {
-        let err = || Err(format!("Encountered {self} when evaluating {i:02}"));
+        let err = || Err(format!("Encountered {self} when evaluating z{i:02}"));
         match self {
             Behavior::X(xi) => {
                 if *xi == i {
@@ -238,28 +189,30 @@ impl Display for Behavior {
     }
 }
 
-// first anomaly: z08. It's obviously wrong, but need to figure out what to swap it with
-
 fn main() {
-    let circuit = Circuit::parse();
+    let mut circuit = Circuit::parse();
+    circuit.swap("z08", "cdj");
+    circuit.swap("z16", "mrb");
+    circuit.swap("z32", "gfm");
+    circuit.swap("dhm", "qjd");
     for i in 0..=circuit.input_bits {
         match circuit.behavior(&format!("z{i:02}")) {
             Err(e) => {
                 println!("ERROR: on z{i:02}: {e}");
-                break;
             }
             Ok(Behavior::Z(zi)) => {
                 if zi == i {
                     println!("Everything from z{i:02} is FINE");
                 } else {
                     println!("Expected z{i:02}, got z{zi:02}");
-                    break;
                 }
             }
             Ok(b) => {
-                println!("Expected z{i:02}, got {b:?}");
-                break;
+                println!("Expected z{i:02}, got {b}");
             }
         }
     }
+    let mut res = vec!["z08", "cdj", "z16", "mrb", "z32", "gfm", "dhm", "qjd"];
+    res.sort();
+    println!("{}", res.join(","));
 }
